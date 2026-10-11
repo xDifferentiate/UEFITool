@@ -61,14 +61,17 @@ public:
     void setText(const UString &text) { itemText = text; }
 
     const UByteArray & header() const { return itemHeader; }
+    void setHeader(const UByteArray & header) { itemHeader = header; }
     bool hasEmptyHeader() const { return itemHeader.isEmpty(); }
     UINT32 headerSize() const { return (UINT32)itemHeader.size(); }
 
     const UByteArray & body() const { return itemBody; };
+    void setBody(const UByteArray & body) { itemBody = body; }
     bool hasEmptyBody() const { return itemBody.isEmpty(); }
     UINT32 bodySize() const { return (UINT32)itemBody.size(); }
 
     const UByteArray & tail() const { return itemTail; };
+    void setTail(const UByteArray & tail) { itemTail = tail; }
     bool hasEmptyTail() const { return itemTail.isEmpty(); }
     UINT32 tailSize() const {return (UINT32)itemTail.size();}
     

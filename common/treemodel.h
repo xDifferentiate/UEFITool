@@ -193,14 +193,17 @@ public:
     UINT32 fullSize(const UModelIndex& index) const;
 
     UByteArray header(const UModelIndex &index) const;
+    void setHeader(const UModelIndex &index, const UByteArray &header);
     bool hasEmptyHeader(const UModelIndex &index) const;
     UINT32 headerSize(const UModelIndex& index) const;
     
     UByteArray body(const UModelIndex &index) const;
+    void setBody(const UModelIndex &index, const UByteArray &body);
     bool hasEmptyBody(const UModelIndex &index) const;
     UINT32 bodySize(const UModelIndex& index) const;
 
     UByteArray tail(const UModelIndex &index) const;
+    void setTail(const UModelIndex &index, const UByteArray &tail);
     bool hasEmptyTail(const UModelIndex &index) const;
     UINT32 tailSize(const UModelIndex& index) const;
 

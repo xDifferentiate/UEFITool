@@ -190,6 +190,9 @@ UString errorCodeToUString(USTATUS errorCode)
         case U_STORES_NOT_FOUND:                return UString("Stores not found");
         case U_INVALID_STORE_SIZE:              return UString("Invalid store size");
         case U_INVALID_STORE:                   return UString("Invalid store");
+        case U_VOLUME_FULL:                     return UString("Not enough free space in volume (volume growth is not supported)");
+        case U_REBASE_REQUIRED:                 return UString("Edit requires PE/TE image rebase, which is not supported");
+        case U_EDIT_NOT_SUPPORTED:              return UString("Edit is not supported for this item");
         default:                                return usprintf("Unknown error %02lX", errorCode);
     }
 }
