@@ -78,6 +78,42 @@ static std::set<std::string> parseMessages(const UByteArray & image)
     return out;
 }
 
+
+// Collects (GUID, body) of every non-pad file except the ones expected to change (the VBT file and its parent compressed container file)
+static void collectFiles(TreeModel & m, const UModelIndex & idx, std::vector<std::pair<std::string, UByteArray> > & out)
+{
+    if (m.type(idx) == Types::File && m.subtype(idx) != EFI_FV_FILETYPE_PAD) {
+        UByteArray g = m.header(idx).left(sizeof(EFI_GUID));
+        EFI_GUID guid; memcpy(&guid, g.constData(), sizeof(EFI_GUID));
+        std::string name = std::string(guidToUString(guid).toLocal8Bit());
+        if (name != "56752DA9-DE6B-4895-8819-1945B6B76C22" && name != "F641AC56-3B92-4154-8547-80EF6AAFF551")
+            out.push_back(std::make_pair(name, m.body(idx)));
+    }
+    for (int i = 0; i < m.rowCount(idx); i++)
+        collectFiles(m, m.index(i, 0, idx), out);
+}
+
+static std::string collateral(const UByteArray & orig, const UByteArray & rebuilt, int & nFiles)
+{
+    TreeModel m1, m2; FfsParser p1(&m1), p2(&m2);
+    p1.parse(orig); p2.parse(rebuilt);
+    std::vector<std::pair<std::string, UByteArray> > a, b;
+    collectFiles(m1, m1.index(0, 0), a); collectFiles(m2, m2.index(0, 0), b);
+    nFiles = (int)a.size();
+    if (a.size() != b.size()) return "file count differs: " + std::to_string(a.size()) + " vs " + std::to_string(b.size());
+    for (size_t i = 0; i < a.size(); i++)
+        if (a[i].first != b[i].first || a[i].second != b[i].second) return "file " + a[i].first + " differs";
+    return "";
+}
+
+static std::string newMessages(const std::set<std::string> & origMsgs, const UByteArray & rebuilt)
+{
+    std::set<std::string> nm = parseMessages(rebuilt);
+    std::string r;
+    for (std::set<std::string>::iterator it = nm.begin(); it != nm.end(); ++it) if (!origMsgs.count(*it)) r += *it + "; ";
+    return r;
+}
+
 int main(int argc, char* argv[])
 {
     if (argc < 2) { std::cout << "usage: uefireplace_test image.bin [outdir]" << std::endl; return 2; }
@@ -154,6 +190,8 @@ int main(int argc, char* argv[])
             std::vector<std::string> added;
             for (std::set<std::string>::iterator it = nm.begin(); it != nm.end(); ++it) if (!origMsgs.count(*it)) added.push_back(*it);
             check(added.empty(), "T4 no new parser messages (checksums etc.) vs original", std::to_string(added.size()) + " new");
+            int nf = 0; std::string col = collateral(image, rebuilt, nf);
+            check(col.empty(), "T4 collateral: all other files (" + std::to_string(nf) + ") byte-identical", col);
             for (size_t i = 0; i < added.size() && i < 10; i++) std::cout << "    new msg: " << added[i] << std::endl;
         }
     }
@@ -172,6 +210,10 @@ int main(int argc, char* argv[])
                 UModelIndex s = ok ? findFileSection(m, m.index(0, 0), vbtGuid, EFI_SECTION_RAW) : UModelIndex();
                 ok = ok && s.isValid() && m.body(s) == mod;
                 check(ok, name + " builds and re-parses with new body");
+                int nf = 0; std::string col = collateral(image, rebuilt, nf);
+                check(col.empty(), name + " collateral: all other files (" + std::to_string(nf) + ") byte-identical", col);
+                std::string nmsg = newMessages(origMsgs, rebuilt);
+                check(nmsg.empty(), name + " no new parser messages", nmsg);
                 if (k == 0) writeFile(outdir + "/T5_shrink64.bin", rebuilt);
             }
             else {
@@ -200,8 +242,55 @@ int main(int argc, char* argv[])
             bool ok = p.parse(rebuilt) == U_SUCCESS && rebuilt.size() == image.size();
             UModelIndex s = ok ? findFileSection(m, m.index(0, 0), vbtGuid, EFI_SECTION_RAW) : UModelIndex();
             check(ok && s.isValid() && m.body(s) == grown, "T7 +16 bytes builds and re-parses");
+            int nf = 0; std::string col = collateral(image, rebuilt, nf);
+            check(col.empty(), "T7 collateral: all other files (" + std::to_string(nf) + ") byte-identical", col);
+            std::string nmsg = newMessages(origMsgs, rebuilt);
+            check(nmsg.empty(), "T7 no new parser messages", nmsg);
         }
         else check(!msgs.empty(), "T7 +16 bytes refused cleanly", std::string(errorCodeToUString(r).toLocal8Bit()) + (msgs.empty() ? "" : " | " + std::string(msgs.back().toLocal8Bit())));
+    }
+
+
+    // ---- T8: modifying a TE/PE image of a PEI-phase file in an uncompressed volume must be refused (needs rebase)
+    {
+        EFI_GUID dg; ustringToGuid(UString("86D70125-BAA3-4296-A62F-602BEBBB9081"), dg); // DxeIpl in Cyborg-STOCK
+        UByteArray dxeIplGuid((const char*)&dg, sizeof(EFI_GUID));
+        TreeModel m; FfsParser p(&m); p.parse(image);
+        UModelIndex s = findFileSection(m, m.index(0, 0), dxeIplGuid, EFI_SECTION_TE);
+        if (!s.isValid()) {
+            std::cout << "[SKIP] T8 DxeIpl TE section not found in this image" << std::endl;
+        }
+        else {
+            UByteArray mod = m.body(s); mod[mod.size() - 1] ^= 1;
+            UByteArray rebuilt; msgs.clear();
+            USTATUS r = rep.replace(image, dxeIplGuid, EFI_SECTION_TE, mod, false, true, rebuilt, msgs);
+            check(r == U_REBASE_REQUIRED && rebuilt.isEmpty(), "T8 TE edit in PEI-phase file refused with REBASE_REQUIRED", errorCodeToUString(r).toLocal8Bit());
+        }
+    }
+
+    // ---- T9: edit inside an EFI 1.1 compressed section (forces recompression), then re-parse
+    {
+        EFI_GUID sg; ustringToGuid(UString("4E22BF36-C59D-47C4-9FD1-25A603D75958"), sg); // SaInitFsp in Cyborg-STOCK
+        UByteArray saGuid((const char*)&sg, sizeof(EFI_GUID));
+        TreeModel m; FfsParser p(&m); p.parse(image);
+        UModelIndex s = findFileSection(m, m.index(0, 0), saGuid, EFI_SECTION_USER_INTERFACE);
+        if (!s.isValid()) {
+            std::cout << "[SKIP] T9 SaInitFsp UI section not found in this image" << std::endl;
+        }
+        else {
+            UByteArray mod = m.body(s); mod[0] = 'Z';
+            UByteArray rebuilt; msgs.clear();
+            USTATUS r = rep.replace(image, saGuid, EFI_SECTION_USER_INTERFACE, mod, false, true, rebuilt, msgs);
+            check(r == U_SUCCESS, "T9 UI-section edit inside EFI 1.1 compressed section builds", r ? errorCodeToUString(r).toLocal8Bit() : "");
+            if (r == U_SUCCESS) {
+                TreeModel m2; FfsParser p2(&m2);
+                bool ok = p2.parse(rebuilt) == U_SUCCESS && rebuilt.size() == image.size();
+                UModelIndex s2 = ok ? findFileSection(m2, m2.index(0, 0), saGuid, EFI_SECTION_USER_INTERFACE) : UModelIndex();
+                check(ok && s2.isValid() && m2.body(s2) == mod, "T9 re-parsed output contains the edited UI section");
+                std::string nmsg = newMessages(origMsgs, rebuilt);
+                check(nmsg.empty(), "T9 no new parser messages", nmsg);
+            }
+        }
     }
 
     std::cout << "FAILURES: " << failures << std::endl;

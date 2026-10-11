@@ -54,6 +54,10 @@ You can either use [pre-built binaries](https://github.com/LongSoft/UEFITool/rel
 * Intel Firmware Interface Table (FIT) editing is not supported right now. FIT contains pointers to various image components that must be loaded before executing the first CPU instruction from the BIOS chip. Those components include CPU microcode updates, binaries and settings used by BIOS Guard and Boot Guard technologies and some other stuff. More information on FIT can be obtained [here](https://edc.intel.com/content/www/us/en/design/products-and-solutions/software-and-services/firmware-and-bios/firmware-interface-table/firmware-interface-table/).
 * Windows builds of `UEFIExtract` and `UEFIFind` might encouter an issue with folder paths being longer than 260 bytes (`MAX_PATH`) on some input files (see [issue #363](https://github.com/LongSoft/UEFITool/issues/363)). This is a [known Windows limitation](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation?tabs=registry), that can be fixed by enabling long paths support via Windows Registry and adding a manifest to the executable file that requires such support. `UEFIExtract` has the required manifest additions since version `A67`, and the required registry file is provided by Microsoft on the page linked above, but this workaround is only awailable starting with Windows 10 build 1067.   
 
+## Experimental editing (this branch)
+
+`UEFIReplace/` contains a size-preserving UEFIReplace for NE built on the new `FfsBuilder`/`FfsOperations::replace`. See `UEFIReplace/README.md` for scope and limits.
+
 ## GUID Database
 
 Every new release includes an update to the database of known UEFI-related GUIDs build with help of [Linux Vendor Firmware Service](https://fwupd.org).
