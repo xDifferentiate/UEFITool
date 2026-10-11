@@ -906,7 +906,21 @@ USTATUS FfsBuilder::buildFfsVolumeBody(const UModelIndex & index, UByteArray & n
         segs.push_back(s);
     }
 
-    // Absorb size changes into directly following pad files / free space, files never move otherwise
+    const UINT8 revision = vp.revision ? vp.revision : 2;
+    auto canShiftFile = [&](const UModelIndex & f, const UINT8 rev) -> bool {
+        const EFI_FFS_FILE_HEADER* fh = (const EFI_FFS_FILE_HEADER*)model->header(f).constData();
+        if (isXipPeiFile(f) || model->fixed(f) || (fh->Attributes & FFS_ATTRIB_FIXED))
+            return false;
+        if ((fh->Attributes & FFS_ATTRIB_DATA_ALIGNMENT) != 0)
+            return false;
+        if (rev > 1 && (fh->Attributes & FFS_ATTRIB_DATA_ALIGNMENT2))
+            return false;
+        if (model->header(f).left(sizeof(EFI_GUID)) == EFI_FFS_VOLUME_TOP_FILE_GUID)
+            return false;
+        return true;
+    };
+
+    // Absorb size changes into following pad files / free space; files move only when canShiftFile() allows it
     for (size_t i = 0; i < segs.size(); i++) {
         if (segs[i].kind == SEG_PAD || segs[i].kind == SEG_FREE)
             continue;
@@ -925,18 +939,34 @@ USTATUS FfsBuilder::buildFfsVolumeBody(const UModelIndex & index, UByteArray & n
                 segs.insert(segs.begin() + i + 1, pad);
             }
             else {
-                msg(usprintf("buildVolume: item shrinks by %u bytes, which is too small for a pad file and no free space follows it", freed), segs[i].idx);
-                return U_VOLUME_FULL;
+                // Too small for a pad file: pull following shiftable files back until free space / a pad file is reached
+                size_t j = i + 1;
+                while (j < segs.size() && segs[j].kind == SEG_FILE && canShiftFile(segs[j].idx, revision))
+                    j++;
+                if (j < segs.size() && (segs[j].kind == SEG_FREE || (segs[j].kind == SEG_PAD && segs[j].padMovable))) {
+                    segs[j].newSize += freed;
+                    segs[j].regen = true;
+                }
+                else {
+                    msg(usprintf("buildVolume: item shrinks by %u bytes, which is too small for a pad file, and no free space is reachable by shifting files", freed), segs[i].idx);
+                    return U_VOLUME_FULL;
+                }
             }
         }
         else {
             UINT32 need = segs[i].newSize - segs[i].origSize;
             size_t j = i + 1;
             while (need > 0) {
+                // Files directly behind the edited one may be shifted towards the end of the volume to reach free space,
+                // as long as moving them is harmless: not XIP/PEI-phase, not fixed, not the VTF, no alignment above 8 bytes
+                if (j < segs.size() && segs[j].kind == SEG_FILE && canShiftFile(segs[j].idx, revision)) {
+                    j++;
+                    continue;
+                }
                 if (j >= segs.size() || !(segs[j].kind == SEG_FREE || (segs[j].kind == SEG_PAD && segs[j].padMovable))) {
-                    msg(usprintf("buildVolume: new content of %s needs %u more bytes than are available in front of the next file; "
-                                 "volume growth and file moving are not supported",
-                                 model->name(segs[i].idx).toLocal8Bit(), need), segs[i].idx);
+                    msg(UString("buildVolume: new content of ") + model->name(segs[i].idx)
+                        + usprintf(" needs %u more bytes than are available (shiftable files followed by free space/pad file); "
+                                   "volume growth and moving of fixed, aligned or PEI-phase files are not supported", need), segs[i].idx);
                     return U_VOLUME_FULL;
                 }
                 if (segs[j].newSize <= need) {
@@ -971,7 +1001,6 @@ USTATUS FfsBuilder::buildFfsVolumeBody(const UModelIndex & index, UByteArray & n
 
     // Materialize
     newBody.clear();
-    const UINT8 revision = vp.revision ? vp.revision : 2;
     for (size_t i = 0; i < segs.size(); i++) {
         Seg & s = segs[i];
         if (s.kind == SEG_FREE) {
