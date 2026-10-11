@@ -50,6 +50,16 @@ private:
     USTATUS buildFile(const UModelIndex & index, UByteArray & file);
     USTATUS buildSection(const UModelIndex & index, UByteArray & section);
     
+    // Generic dispatcher for any child item
+    USTATUS buildChild(const UModelIndex & index, UByteArray & built);
+    // Concatenates built children of a container item (sections, raw area items), preserving alignment bytes
+    USTATUS buildChildren(const UModelIndex & index, UByteArray & built, const UINT32 sectionAlignment, std::vector<UINT32> * offsets);
+    USTATUS buildFfsVolumeBody(const UModelIndex & index, UByteArray & body);
+    USTATUS buildFileWithBody(const UModelIndex & index, const UByteArray & body, UByteArray & file);
+    // Returns true if the item or any of its descendants has an action other than NoAction
+    bool isModified(const UModelIndex & index) const;
+    bool isXipPeiFile(const UModelIndex & fileIndex) const;
+
     // Utility functions
     USTATUS erase(const UModelIndex & index, UByteArray & erased);
 };
