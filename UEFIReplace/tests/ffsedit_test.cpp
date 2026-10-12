@@ -11,6 +11,7 @@ Exit code is the number of failed checks.
 #include <set>
 
 #include "../uefireplace.h"
+#include "../../UEFIPatch/uefipatch.h"
 #include "../../common/filesystem.h"
 #include "../../common/ffs.h"
 #include "../../common/utility.h"
@@ -290,6 +291,156 @@ int main(int argc, char* argv[])
                 std::string nmsg = newMessages(origMsgs, rebuilt);
                 check(nmsg.empty(), "T9 no new parser messages", nmsg);
             }
+        }
+    }
+
+
+    // ======== UEFIPatch tests (T10+) ========
+    {
+        const std::string G = "56752DA9-DE6B-4895-8819-1945B6B76C22";
+        UEFIPatch patcher;
+
+        // Topmost FFS file containing the VBT section: all raw differences must stay inside it
+        // (VBT lives in a compressed container, so the whole compressed stream is legitimately re-encoded)
+        long fileStart = -1, fileEnd = -1;
+        {
+            TreeModel m; FfsParser p(&m); p.parse(image);
+            UModelIndex s = findFileSection(m, m.index(0, 0), vbtGuid, EFI_SECTION_RAW);
+            UModelIndex top = s;
+            for (UModelIndex f = m.findParentOfType(s, Types::File); f.isValid(); f = m.findParentOfType(f.parent(), Types::File)) top = f;
+            UModelIndex topFile = m.findParentOfType(top, Types::File);
+            if (!topFile.isValid() && m.type(top) == Types::File) topFile = top;
+            UByteArray full = m.full(topFile);
+            fileStart = image.indexOf(full);
+            fileEnd = fileStart + full.size();
+            std::cout << "    VBT is inside top-level FFS file [0x" << std::hex << fileStart << ", 0x" << fileEnd << std::dec << ")" << std::endl;
+        }
+        auto diffInside = [&](const UByteArray & out, long & n, long & first, long & last) {
+            n = 0; first = last = -1;
+            for (int i = 0; i < out.size(); i++) if (out[i] != image[i]) { if (first < 0) first = i; last = i; n++; }
+            return n == 0 || (first >= fileStart && last < fileEnd);
+        };
+        // Expected body computed independently of the patch code
+        auto expectReplaceAll = [&](UByteArray b, const std::string & find, const UByteArray & repl, int & count) {
+            count = 0; int pos = 0;
+            while ((pos = b.indexOf(UByteArray(find.data(), (int)find.size()), pos)) >= 0) {
+                for (int i = 0; i < repl.size(); i++) b[pos + i] = repl[i];
+                pos += 1; count++;
+            }
+            return b;
+        };
+        auto runCase = [&](const std::string & name, const std::string & text, const UByteArray & expectedBody, bool expectChange) {
+            UByteArray out; msgs.clear();
+            USTATUS r = patcher.patch(image, text, out, msgs);
+            check(r == U_SUCCESS, name + " patch applied", r ? errorCodeToUString(r).toLocal8Bit() : "");
+            if (r != U_SUCCESS) return;
+            writeFile(outdir + "/" + name.substr(0, name.find(' ')) + "_patched.bin", out);
+            check(out.size() == image.size(), name + " output size unchanged");
+            TreeModel m; FfsParser p(&m);
+            check(p.parse(out) == U_SUCCESS, name + " output re-parses");
+            UModelIndex s = findFileSection(m, m.index(0, 0), vbtGuid, EFI_SECTION_RAW);
+            check(s.isValid() && m.body(s) == expectedBody, name + " VBT body equals independently computed expected body");
+            check(expectChange == (expectedBody != vbtBody), name + " expected body differs from original as intended");
+            int nf = 0; std::string col = collateral(image, out, nf);
+            check(col.empty(), name + " collateral: all " + std::to_string(nf) + " parsed files byte-identical in content (the VBT file and its compressed container are excluded)", col);
+            std::string nmsg = newMessages(origMsgs, out);
+            check(nmsg.empty(), name + " no new parser messages (checksums valid)", nmsg);
+            long n, f, l; bool inside = diffInside(out, n, f, l);
+            char buf[200]; snprintf(buf, sizeof(buf), "%ld raw bytes differ, 0x%lX..0x%lX", n, f, l);
+            check(inside, name + " raw differences confined to the containing FFS file", buf);
+            // body byte-level diff vs original is exactly the intended bytes
+            long bodyDiff = 0; for (int i = 0; i < expectedBody.size() && i < vbtBody.size(); i++) if (expectedBody[i] != vbtBody[i]) bodyDiff++;
+            std::cout << "    " << bodyDiff << " VBT body bytes changed" << std::endl;
+        };
+
+        // T10: pattern patch, every occurrence of "LFP_PanelName" -> "LFP_XanelName" (hex, 13 bytes)
+        {
+            int cnt = 0; UByteArray exp = expectReplaceAll(vbtBody, "LFP_PanelName", UByteArray("LFP_XanelName", 13), cnt);
+            std::cout << "    T10 occurrences in VBT body: " << cnt << std::endl;
+            check(cnt > 0, "T10 pattern occurs in the VBT body");
+            runCase("T10 hex pattern patch", "# comment\n\n" + G + " 19 P:4C46505F50616E656C4E616D65:4C46505F58616E656C4E616D65 \n", exp, true);
+        }
+        // T11: wildcards in find ('.' nibble and byte) and replace (".8" keeps the upper nibble of 'P' = 5 -> 0x58 'X', ".." keeps the byte)
+        {
+            UByteArray exp = vbtBody; int pos = 0; UByteArray f("LFP_PanelName", 13); int cnt = 0;
+            while ((pos = exp.indexOf(f, pos)) >= 0) { exp[pos + 4] = 'X'; pos++; cnt++; }
+            std::string repl = std::string(8, '.') + ".8" + std::string(16, '.');
+            runCase("T11 wildcard patch", G + " 19 P:4C46505F5.61..656C4E616D65:" + repl + " \n", exp, true);
+        }
+        // T12: offset patch with placeholders at 0x10: ".F55A." -> byte0 keeps upper nibble + F, byte1 = 55, byte2 = A + keeps lower nibble
+        {
+            UByteArray exp = vbtBody;
+            exp[0x10] = (char)((((UINT8)exp[0x10]) & 0xF0) + 0x0F);
+            exp[0x11] = 0x55;
+            exp[0x12] = (char)(0xA0 + (((UINT8)exp[0x12]) & 0x0F));
+            runCase("T12 offset patch with placeholders", G + " 19 O:10:.F55A. \n", exp, true);
+        }
+        // T13: two lines, applied in sequence (second sees first one's result)
+        {
+            int cnt = 0; UByteArray exp = expectReplaceAll(vbtBody, "LFP_PanelName", UByteArray("LFP_XanelName", 13), cnt);
+            exp[0x20] = 0x7E;
+            runCase("T13 two patch lines", G + " 19 P:4C46505F50616E656C4E616D65:4C46505F58616E656C4E616D65 \n" + G + " 19 O:20:7E \n", exp, true);
+        }
+        // T14: no match -> NOTHING_TO_PATCH and no output
+        {
+            UByteArray out; msgs.clear();
+            USTATUS r = patcher.patch(image, G + " 19 P:ABCDEF0123456789AA:00 \n", out, msgs);
+            check(r == U_NOTHING_TO_PATCH && out.isEmpty(), "T14 pattern without match -> NOTHING_TO_PATCH, no output", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, "11111111-2222-3333-4444-555555555555 19 P:4C46505F:4C46505F \n", out, msgs);
+            check(r == U_NOTHING_TO_PATCH && out.isEmpty(), "T14 unknown GUID -> NOTHING_TO_PATCH", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, G + " 10 P:4C46505F:4C46505F \n", out, msgs);
+            check(r == U_NOTHING_TO_PATCH, "T14 wrong section type (PE32 instead of RAW) -> NOTHING_TO_PATCH", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, G + " 19 P:4C46505F50:4C46505F50 \n", out, msgs);
+            check(r == U_NOTHING_TO_PATCH && out.isEmpty(), "T14 matching but identical replacement -> NOTHING_TO_PATCH (as old_engine)", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, "# only comments\n\n", out, msgs);
+            check(r == U_NOTHING_TO_PATCH, "T14 empty patch file -> NOTHING_TO_PATCH", errorCodeToUString(r).toLocal8Bit());
+        }
+        // T15: wrong lengths / malformed patches
+        {
+            UByteArray out; USTATUS r;
+            r = patcher.patch(image, G + " 19 P:4C46505:4C46505F \n", out, msgs);
+            check(r == U_INVALID_PARAMETER && out.isEmpty(), "T15 odd-length find pattern -> INVALID_PARAMETER", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, G + " 19 P:4C46505F:4C4 \n", out, msgs);
+            check(r == U_INVALID_PARAMETER && out.isEmpty(), "T15 odd-length replace pattern -> INVALID_PARAMETER", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, G + " 19 O:FFFFFFF:4C46 \n", out, msgs);
+            check(r == U_PATCH_OFFSET_OUT_OF_BOUNDS && out.isEmpty(), "T15 offset out of bounds -> PATCH_OFFSET_OUT_OF_BOUNDS", errorCodeToUString(r).toLocal8Bit());
+            char ob[40]; snprintf(ob, sizeof(ob), "O:%X:4C46", (unsigned)vbtBody.size() - 1);
+            r = patcher.patch(image, G + " 19 " + ob + " \n", out, msgs);
+            check(r == U_PATCH_OFFSET_OUT_OF_BOUNDS, "T15 2-byte patch starting at last body byte -> PATCH_OFFSET_OUT_OF_BOUNDS", errorCodeToUString(r).toLocal8Bit());
+            snprintf(ob, sizeof(ob), "O:%X:4C46", (unsigned)vbtBody.size() - 2);
+            r = patcher.patch(image, G + " 19 " + ob + " \n", out, msgs);
+            check(r == U_SUCCESS || r == U_NOTHING_TO_PATCH, "T15 2-byte patch ending exactly at body end is in bounds", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, G + " 19 P:4C46505F:4C4G \n", out, msgs);
+            check(r == U_INVALID_SYMBOL && out.isEmpty(), "T15 non-hex replace symbol -> INVALID_SYMBOL", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, G + " 19 P:4C46505F:4C46505F \n" + G + " 19 O:0:ZZ \n", out, msgs);
+            check(r == U_INVALID_SYMBOL && out.isEmpty(), "T15 error on a later line aborts everything, no output", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, G + " XY P:4C:4C \n", out, msgs);
+            check(r == U_INVALID_PARAMETER, "T15 invalid section type -> INVALID_PARAMETER", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, "not-a-guid 19 P:4C:4C \n", out, msgs);
+            check(r == U_INVALID_PARAMETER, "T15 invalid GUID -> INVALID_PARAMETER (old_engine silently used a null GUID)", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, G + " 19 Q:4C:4C \n", out, msgs);
+            check(r == U_INVALID_PARAMETER, "T15 only unknown patch types on a matching section -> INVALID_PARAMETER (empty patch list, as old_engine)", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(image, G + " 19\n", out, msgs);
+            check(r == U_NOTHING_TO_PATCH, "T15 line with fewer than 3 fields is skipped", errorCodeToUString(r).toLocal8Bit());
+            r = patcher.patch(UByteArray("garbage", 7), G + " 19 O:0:00 \n", out, msgs);
+            check(r != U_SUCCESS && out.isEmpty(), "T15 non-image input fails to parse", errorCodeToUString(r).toLocal8Bit());
+        }
+        // T16: matcher unit tests
+        {
+            UByteArray d("\x12\x34\x56\x12\x34", 5); USTATUS r;
+            r = uefiPatchViaPattern(d, "2345", "AABB");   // matches at odd nibble offset 1 only: must be skipped
+            check(r == U_SUCCESS && d == UByteArray("\x12\x34\x56\x12\x34", 5), "T16 matches at odd nibble offsets are skipped");
+            r = uefiPatchViaPattern(d, "1234", "FFEE");   // both occurrences replaced
+            check(r == U_SUCCESS && d == UByteArray("\xFF\xEE\x56\xFF\xEE", 5), "T16 all occurrences replaced");
+            d = UByteArray("\xAB\xCD", 2);
+            r = uefiPatchViaPattern(d, "a.cd", "..EF");   // case-insensitive find, '.' wildcard
+            check(r == U_SUCCESS && d == UByteArray("\xAB\xEF", 2), "T16 case-insensitive find, wildcard replace keeps byte");
+            r = uefiPatchViaOffset(d, 0, ".1");
+            check(r == U_SUCCESS && d == UByteArray("\xA1\xEF", 2), "T16 upper-nibble placeholder keeps upper nibble");
+            r = uefiPatchViaOffset(d, 1, "E.");
+            check(r == U_SUCCESS && d == UByteArray("\xA1\xEF", 2), "T16 lower-nibble placeholder keeps lower nibble");
+            r = uefiPatchViaOffset(d, 0, "112233");
+            check(r == U_PATCH_OFFSET_OUT_OF_BOUNDS && d == UByteArray("\xA1\xEF", 2), "T16 replace pattern longer than body is out of bounds, data untouched");
         }
     }
 
