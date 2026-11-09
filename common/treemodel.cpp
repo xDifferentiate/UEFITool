@@ -473,6 +473,33 @@ void TreeModel::addInfo(const UModelIndex &index, const UString &data, const boo
     emit dataChanged(index, index);
 }
 
+void TreeModel::setHeader(const UModelIndex &index, const UByteArray &header)
+{
+    if (!index.isValid())
+        return;
+    TreeItem *item = static_cast<TreeItem*>(index.internalPointer());
+    item->setHeader(header);
+    emit dataChanged(index, index);
+}
+
+void TreeModel::setBody(const UModelIndex &index, const UByteArray &body)
+{
+    if (!index.isValid())
+        return;
+    TreeItem *item = static_cast<TreeItem*>(index.internalPointer());
+    item->setBody(body);
+    emit dataChanged(index, index);
+}
+
+void TreeModel::setTail(const UModelIndex &index, const UByteArray &tail)
+{
+    if (!index.isValid())
+        return;
+    TreeItem *item = static_cast<TreeItem*>(index.internalPointer());
+    item->setTail(tail);
+    emit dataChanged(index, index);
+}
+
 void TreeModel::setAction(const UModelIndex &index, const UINT8 action)
 {
     if (!index.isValid())

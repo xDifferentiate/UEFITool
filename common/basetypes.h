@@ -79,6 +79,9 @@ typedef size_t USTATUS;
 #define U_ZLIB_DECOMPRESSION_FAILED       56
 #define U_INVALID_STORE                   57
 #define U_BROTLI_DECOMPRESSION_FAILED     58
+#define U_VOLUME_FULL                     59
+#define U_REBASE_REQUIRED                 60
+#define U_EDIT_NOT_SUPPORTED              61
 
 #define U_INVALID_MANIFEST                251
 #define U_UNKNOWN_MANIFEST_HEADER_VERSION 252
